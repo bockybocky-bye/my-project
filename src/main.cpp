@@ -471,6 +471,8 @@ void loop() {
 
 */
 
+
+/*
 #include <Arduino.h>
 #include <Wire.h>
 #include "imu9250.h"
@@ -508,7 +510,7 @@ void setup() {
 void loop() {
 
 }
-
+*/
 
 /*
 #include <Arduino.h>
@@ -569,3 +571,114 @@ void setup() {
 
 void loop() {}
 */
+
+
+#include <Arduino.h>
+#include <Wire.h>
+#include "imu9250.h"
+
+static Imu9250Data imu;
+
+// ====== ตั้งค่า pin I2C ของ ESP32 ======
+static const int SDA_PIN = 21;   // หรือ 19
+static const int SCL_PIN = 22;   // หรือ 18
+
+// ====== ใส่ค่า calibration ที่คุณได้ล่าสุด (ตัวอย่างจากของอิ๋ม) ======
+// ถ้ายังไม่อยากใช้ ก็ set เป็น false ไว้ก่อน
+static const bool USE_SAVED_CAL = true;
+
+// accelBias [m/s^2] , gyroBias [rad/s], magOffset/raw , magScale
+static const float AXB = 0.81f,  AYB = 0.29f,  AZB = -1.45f;
+static const float GXB = -0.05f, GYB = -0.06f, GZB = 0.00f;
+static const float MOX = 249.50f, MOY = 341.50f, MOZ = 112.50f;
+static const float MSX = 1.16f,   MSY = 0.93f,   MSZ = 0.93f;
+
+// ====== เลือกว่าจะคาลิเบรตทุกครั้งไหม ======
+// แนะนำ: false (คาลิเบรตเมื่อสั่งเท่านั้น)
+static const bool DO_CALIB_ON_BOOT = false;
+
+void doCalibrationOnce()
+{
+  Serial.println("\n=== Hold still: gyro+acc calib ===");
+  imu9250_calibrate_gyro_accel(2000);
+
+  Serial.println("\n=== Rotate all directions (figure-8): mag calib ===");
+  float mxmin, mxmax, mymin, mymax, mzmin, mzmax;
+  imu9250_collect_mag_minmax(2000, mxmin, mxmax, mymin, mymax, mzmin, mzmax);
+  imu9250_compute_mag_calib(mxmin, mxmax, mymin, mymax, mzmin, mzmax);
+
+  Serial.println("\n=== Copy these values to main.cpp (or save to NVS later) ===");
+  // ตรงนี้ “ค่าจริง” ถูกเก็บในตัวแปร static ใน imu9250.cpp แล้ว
+  // วิธีง่ายสุดคือให้คุณดู Serial log ที่พิมพ์จาก compute_mag_calib + calibrate_gyro_accel
+  Serial.println("Calibration done.\n");
+}
+
+void setup()
+{
+  Serial.begin(115200);
+  delay(800);
+
+  // 1) main เป็นคนเริ่ม I2C เอง
+  Wire.begin(SDA_PIN, SCL_PIN);
+  Wire.setClock(400000);
+
+  // 2) init IMU
+  imu9250_init();
+  Serial.println("IMU9250 INIT DONE");
+
+  // 3) warmup อ่านทิ้งให้เซนเซอร์ตื่น
+  Imu9250Data tmp;
+  for (int i = 0; i < 200; i++) {
+    imu9250_read(tmp);
+    delay(5);
+  }
+
+  // 4) โหลดค่าคาลิเบรตที่เคยได้ (โหมดใช้งานจริง)
+  if (USE_SAVED_CAL) {
+    imu9250_set_calibration(
+      AXB, AYB, AZB,
+      GXB, GYB, GZB,
+      MOX, MOY, MOZ,
+      MSX, MSY, MSZ
+    );
+    Serial.println("Loaded saved calibration.");
+  }
+
+  // 5) ถ้าต้องการคาลิเบรตตอนบูต (ไม่ค่อยแนะนำ) เปิด flag นี้
+  if (DO_CALIB_ON_BOOT) {
+    doCalibrationOnce();
+  }
+
+  Serial.println("Ready.");
+}
+
+void loop()
+{
+  imu9250_read(imu);
+
+  static uint32_t last = 0;
+  if (millis() - last > 100) {
+    last = millis();
+
+    // ตัวอย่างพิมพ์ค่าไปดู
+    Serial.print("acc=");
+    Serial.print(imu.ax, 2); Serial.print(",");
+    Serial.print(imu.ay, 2); Serial.print(",");
+    Serial.print(imu.az, 2);
+
+    Serial.print("  gyro=");
+    Serial.print(imu.gx, 3); Serial.print(",");
+    Serial.print(imu.gy, 3); Serial.print(",");
+    Serial.print(imu.gz, 3);
+
+    Serial.print("  mag=");
+    Serial.print(imu.mx, 1); Serial.print(",");
+    Serial.print(imu.my, 1); Serial.print(",");
+    Serial.print(imu.mz, 1);
+
+    Serial.print("  rpy=");
+    Serial.print(imu.roll_deg, 1); Serial.print(",");
+    Serial.print(imu.pitch_deg, 1); Serial.print(",");
+    Serial.println(imu.yaw_deg, 1);
+  }
+}
