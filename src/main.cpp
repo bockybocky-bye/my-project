@@ -588,10 +588,10 @@ static const int SCL_PIN = 22;   // หรือ 18
 static const bool USE_SAVED_CAL = true;
 
 // accelBias [m/s^2] , gyroBias [rad/s], magOffset/raw , magScale
-static const float AXB = 0.81f,  AYB = 0.29f,  AZB = -1.45f;
-static const float GXB = -0.05f, GYB = -0.06f, GZB = 0.00f;
-static const float MOX = 249.50f, MOY = 341.50f, MOZ = 112.50f;
-static const float MSX = 1.16f,   MSY = 0.93f,   MSZ = 0.93f;
+static const float AXB = 0.00f,  AYB = 0.00f,  AZB = -1.81f;
+static const float GXB = 0.00f, GYB = 0.00f, GZB = 0.00f;
+static const float MOX = 110.50f, MOY = 384.00f, MOZ = 54.00f;
+static const float MSX = 1.10f,   MSY = 1.00f,   MSZ = 0.92f;
 
 // ====== เลือกว่าจะคาลิเบรตทุกครั้งไหม ======
 // แนะนำ: false (คาลิเบรตเมื่อสั่งเท่านั้น)

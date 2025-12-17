@@ -297,10 +297,6 @@ void imu9250_calibrate_gyro_accel(int samples)
         ay_sum += ((double)ay_raw / ACC_LSB) * g0;
         az_sum += ((double)az_raw / ACC_LSB) * g0;
 
-        gx_sum += gx_raw;
-        gy_sum += gy_raw;
-        gz_sum += gz_raw;
-
         // gyro -> rad/s
         gx_sum += ((double)gx_raw / GYRO_LSB) * DEG2RAD;
         gy_sum += ((double)gy_raw / GYRO_LSB) * DEG2RAD;
