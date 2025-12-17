@@ -44,6 +44,10 @@ static float gyroBiasZ  = 0.0f;
 // ค่าเก็บไว้ล่าสุด (ถ้า mag ยังไม่ ready จะใช้ค่าก่อนหน้า)
 static Imu9250Data g_lastData;
 
+static bool g_lastMagUpdated = false;   // บอกว่า "รอบล่าสุดอ่าน mag ใหม่ได้ไหม"
+
+
+
 // -------------------- I2C helpers --------------------
 static void i2cWriteByte(uint8_t addr, uint8_t reg, uint8_t data)
 {
@@ -53,26 +57,29 @@ static void i2cWriteByte(uint8_t addr, uint8_t reg, uint8_t data)
     Wire.endTransmission();
 }
 
-static void i2cReadBytes(uint8_t addr, uint8_t reg, uint8_t count, uint8_t *dest)
+static bool i2cReadBytes(uint8_t addr, uint8_t reg, uint8_t count, uint8_t *dest)
 {
     Wire.beginTransmission(addr);
     Wire.write(reg);
-    uint8_t err = Wire.endTransmission();  // stop ปกติ
 
-    if (err != 0)
-    {
-        // สามารถเปิด debug ตรงนี้ได้ถ้าต้องการ
-        // Serial.print("I2C error "); Serial.println(err);
-        return;
+    // ใช้ repeated-start เพื่อความชัวร์กับอุปกรณ์ I2C หลายตัว
+    uint8_t err = Wire.endTransmission(false);
+    if (err != 0) {
+        memset(dest, 0, count);
+        return false;
     }
 
-    Wire.requestFrom((int)addr, (int)count);
-    int i = 0;
-    while (Wire.available() && i < count)
-    {
-        dest[i++] = Wire.read();
+    uint8_t got = Wire.requestFrom((int)addr, (int)count, (int)true);
+    if (got != count) {
+        while (Wire.available()) Wire.read();
+        memset(dest, 0, count);
+        return false;
     }
+
+    for (int i = 0; i < count; i++) dest[i] = Wire.read();
+    return true;
 }
+
 
 // -------------------- init MPU9250 --------------------
 static void initMPU9250()
@@ -116,8 +123,10 @@ static void initAK8963()
 static void readAccelGyro(Imu9250Data &out)
 {
     uint8_t buf[14];
-    i2cReadBytes(MPU9250_ADDR, MPU9250_ACCEL_XOUT_H, 14, buf);
-
+    if (!i2cReadBytes(MPU9250_ADDR, MPU9250_ACCEL_XOUT_H, 14, buf)) {
+        // อ่านไม่ได้ → ไม่เปลี่ยนค่า (กันค่าหลุด)
+        return;
+    }
     int16_t ax_raw = (int16_t)(buf[0]  << 8 | buf[1]);
     int16_t ay_raw = (int16_t)(buf[2]  << 8 | buf[3]);
     int16_t az_raw = (int16_t)(buf[4]  << 8 | buf[5]);
@@ -228,8 +237,7 @@ static void computeAngles(Imu9250Data &out)
 // -------------------- public API --------------------
 void imu9250_init()
 {
-    // ถ้าใช้ ESP32: อย่าลืมเรียก Wire.begin(SDA,SCL) ใน main ก่อน
-    Wire.begin();
+
     Wire.setClock(400000);
 
     initMPU9250();
@@ -237,6 +245,7 @@ void imu9250_init()
 
     // clear data
     memset(&g_lastData, 0, sizeof(g_lastData));
+    g_lastMagUpdated = false;
 }
 
 bool imu9250_read(Imu9250Data &out)
@@ -245,7 +254,7 @@ bool imu9250_read(Imu9250Data &out)
 
     readAccelGyro(out);
 
-    bool magUpdated = readMag(out);   // ✅ ได้/ไม่ได้
+    g_lastMagUpdated = readMag(out);   // ✅ ได้/ไม่ได้
 
     computeAngles(out);
 
@@ -257,53 +266,82 @@ bool imu9250_read(Imu9250Data &out)
 
 void imu9250_calibrate_gyro_accel(int samples)
 {
+    // scale เดิม: accel ±8g => 4096 LSB/g, gyro ±500 dps => 65.5 LSB/dps
+    const float g0 = 9.80665f;
+    const float ACC_LSB = 4096.0f; // ±8g
+    const float GYRO_LSB = 65.5f;  // ±500 dps
+    const float DEG2RAD = PI / 180.0f;
+
     long ax_sum = 0, ay_sum = 0, az_sum = 0;
     long gx_sum = 0, gy_sum = 0, gz_sum = 0;
+
+    int good = 0;
 
     for (int i = 0; i < samples; i++)
     {
         uint8_t buf[14];
-        i2cReadBytes(MPU9250_ADDR, MPU9250_ACCEL_XOUT_H, 14, buf);
-
+        if (!i2cReadBytes(MPU9250_ADDR, MPU9250_ACCEL_XOUT_H, 14, buf)) {
+            delay(5);
+            continue;
+        }
         int16_t ax_raw = (int16_t)(buf[0]  << 8 | buf[1]);
         int16_t ay_raw = (int16_t)(buf[2]  << 8 | buf[3]);
         int16_t az_raw = (int16_t)(buf[4]  << 8 | buf[5]);
+
         int16_t gx_raw = (int16_t)(buf[8]  << 8 | buf[9]);
         int16_t gy_raw = (int16_t)(buf[10] << 8 | buf[11]);
         int16_t gz_raw = (int16_t)(buf[12] << 8 | buf[13]);
 
-        ax_sum += ax_raw;
-        ay_sum += ay_raw;
-        az_sum += az_raw;
+        // accel -> m/s^2
+        ax_sum += ((double)ax_raw / ACC_LSB) * g0;
+        ay_sum += ((double)ay_raw / ACC_LSB) * g0;
+        az_sum += ((double)az_raw / ACC_LSB) * g0;
+
         gx_sum += gx_raw;
         gy_sum += gy_raw;
         gz_sum += gz_raw;
 
+        // gyro -> rad/s
+        gx_sum += ((double)gx_raw / GYRO_LSB) * DEG2RAD;
+        gy_sum += ((double)gy_raw / GYRO_LSB) * DEG2RAD;
+        gz_sum += ((double)gz_raw / GYRO_LSB) * DEG2RAD;
+
+        good++;
         delay(5);
     }
 
-    float ax_avg = (float)ax_sum / samples;
-    float ay_avg = (float)ay_sum / samples;
-    float az_avg = (float)az_sum / samples;
+    if (good < 10){
+        Serial.println("Calib failed: too few valid samples");
+        return;
+    }
 
-    float gx_avg = (float)gx_sum / samples;
-    float gy_avg = (float)gy_sum / samples;
-    float gz_avg = (float)gz_sum / samples;
+    float ax_mean = (float)(ax_sum / good);
+    float ay_mean = (float)(ay_sum / good);
+    float az_mean = (float)(az_sum / good);
 
-    // scale เดิม: accel ±8g => 4096 LSB/g, gyro ±500 dps => 65.5 LSB/dps
-    const float g = 9.80665f;
-    const float ACC_LSB = 4096.0f;
-    const float GYRO_LSB = 65.5f;
-    const float DEG2RAD = PI / 180.0f;
+    float gx_mean = (float)(gx_sum / good);
+    float gy_mean = (float)(gy_sum / good);
+    float gz_mean = (float)(gz_sum / good);
 
-    // สมมติว่าเวลาตั้งนิ่ง แกน Z ชี้ขึ้น: az_raw ≈ +1 g
-    accelBiasX = (ax_avg / ACC_LSB) * g;          // ควรใกล้ 0
-    accelBiasY = (ay_avg / ACC_LSB) * g;
-    accelBiasZ = ((az_avg - ACC_LSB) / ACC_LSB) * g; // ลบ 1g ออก
 
-    gyroBiasX = (gx_avg / GYRO_LSB) * DEG2RAD;
-    gyroBiasY = (gy_avg / GYRO_LSB) * DEG2RAD;
-    gyroBiasZ = (gz_avg / GYRO_LSB) * DEG2RAD;
+    // gyro bias = mean
+    gyroBiasX = gx_mean;
+    gyroBiasY = gy_mean;
+    gyroBiasZ = gz_mean;
+
+    // accel bias: หาแนว gravity จาก mean แล้วเอา "ส่วนที่เกิน g" ออก
+    float norm = sqrtf(ax_mean*ax_mean + ay_mean*ay_mean + az_mean*az_mean);
+    if (norm < 1e-3f) norm = 1.0f;
+
+    float ux = ax_mean / norm;
+    float uy = ay_mean / norm;
+    float uz = az_mean / norm;
+
+    // expected gravity vector = g0 * u
+    accelBiasX = ax_mean - g0 * ux;
+    accelBiasY = ay_mean - g0 * uy;
+    accelBiasZ = az_mean - g0 * uz;
+
 
     Serial.println("IMU9250 calib done.");
     Serial.print("accelBias [m/s^2] = ");
@@ -332,18 +370,11 @@ void imu9250_collect_mag_minmax(int samples,
     {
         imu9250_read(d);
 
-        // ✅ ถ้าค่า mag ยังเป็นศูนย์/ค้าง (เช่น DRDY ไม่มา) ให้ข้าม
-        // วิธีที่ชัวร์กว่า: “เช็คว่ามีการเปลี่ยนจริง” โดยเทียบกับค่าก่อนหน้า
-        static float lastMx = 123456, lastMy = 123456, lastMz = 123456;
-        bool changed = (d.mx != lastMx) || (d.my != lastMy) || (d.mz != lastMz);
-
-        if (!changed) {
-            // Serial.println("skip sample (no new mag data)");
+        if (!g_lastMagUpdated){
+            // รอบนี้ไม่มี mag ใหม่จริงๆ
             delay(5);
             continue;
         }
-
-        lastMx = d.mx; lastMy = d.my; lastMz = d.mz;
 
         // อัปเดต min/max เฉพาะตอนมี sample ใหม่
         if (d.mx < mx_min) mx_min = d.mx;
@@ -357,6 +388,10 @@ void imu9250_collect_mag_minmax(int samples,
 
         got++;
 
+        if ((got % 100) == 0) {
+            Serial.print("mag calib collected = ");
+            Serial.println(got);
+        }
         // debug
         //Serial.print("mag sample "); Serial.print(got);
         //Serial.print(" | mx="); Serial.print(d.mx);
