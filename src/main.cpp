@@ -572,7 +572,7 @@ void setup() {
 void loop() {}
 */
 
-
+/*
 #include <Arduino.h>
 #include <Wire.h>
 #include "imu9250.h"
@@ -680,5 +680,94 @@ void loop()
     Serial.print(imu.roll_deg, 1); Serial.print(",");
     Serial.print(imu.pitch_deg, 1); Serial.print(",");
     Serial.println(imu.yaw_deg, 1);
+  }
+}
+*/
+
+#include <Arduino.h>
+#include <Wire.h>
+#include "imu9250.h"
+#include "ahrs_complementary.h"
+
+
+static const bool USE_SAVED_CAL = true;
+
+// accelBias [m/s^2] , gyroBias [rad/s], magOffset/raw , magScale
+static const float AXB = 0.00f,  AYB = 0.00f,  AZB = -1.81f;
+static const float GXB = 0.00f,  GYB = 0.00f,  GZB = 0.00f;
+static const float MOX = 110.50f, MOY = 384.00f, MOZ = 54.00f;
+static const float MSX = 1.10f,   MSY = 1.00f,   MSZ = 0.92f;
+
+Imu9250Data imu;
+AhrsCompState ahrs;
+
+static uint32_t last_us = 0;
+
+void setup() {
+  Serial.begin(115200);
+  Wire.begin(21, 22);
+  Wire.setClock(400000);
+
+  imu9250_init();
+  delay(200);
+
+  // warmup
+  for(int i=0;i<100;i++){
+    imu9250_read(imu);
+    delay(10);
+  }
+
+  if (USE_SAVED_CAL) {
+    imu9250_set_calibration(
+      AXB, AYB, AZB,
+      GXB, GYB, GZB,
+      MOX, MOY, MOZ,
+      MSX, MSY, MSZ
+    );
+    Serial.println("Loaded saved calibration.");
+  }
+
+  ahrs_comp_init(&ahrs, 0.98f);
+  last_us = micros();
+  Serial.println("AHRS complementary test start");
+}
+
+void loop() {
+  imu9250_read(imu);
+
+  uint32_t now = micros();
+  float dt = (now - last_us) * 1e-6f;
+  last_us = now;
+  if(dt <= 0 || dt > 0.2f) dt = 0.01f;
+
+  ahrs_comp_update(&ahrs,
+                   imu.ax, imu.ay, imu.az,
+                   imu.gx, imu.gy, imu.gz,
+                   imu.mx, imu.my, imu.mz,
+                   dt);
+
+  static uint32_t lastPrint = 0;
+  if(millis() - lastPrint >= 100){
+    lastPrint = millis();
+
+    float r = ahrs_rad2deg(ahrs.roll);
+    float p = ahrs_rad2deg(ahrs.pitch);
+    float y = ahrs_rad2deg(ahrs.yaw);
+
+    Serial.print("acc="); Serial.print(imu.ax,2); Serial.print(",");
+    Serial.print(imu.ay,2); Serial.print(",");
+    Serial.print(imu.az,2);
+
+    Serial.print("  gyro="); Serial.print(imu.gx,3); Serial.print(",");
+    Serial.print(imu.gy,3); Serial.print(",");
+    Serial.print(imu.gz,3);
+
+    Serial.print("  mag="); Serial.print(imu.mx,1); Serial.print(",");
+    Serial.print(imu.my,1); Serial.print(",");
+    Serial.print(imu.mz,1);
+
+    Serial.print("  RPYc="); Serial.print(r,1); Serial.print(",");
+    Serial.print(p,1); Serial.print(",");
+    Serial.println(y,1);
   }
 }
