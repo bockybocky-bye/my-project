@@ -46,7 +46,13 @@ static Imu9250Data g_lastData;
 
 static bool g_lastMagUpdated = false;   // บอกว่า "รอบล่าสุดอ่าน mag ใหม่ได้ไหม"
 
+// ---- Complementary filter state ----
+static float cf_roll = 0.0f;   // rad
+static float cf_pitch = 0.0f;  // rad
+static float cf_yaw = 0.0f;    // rad (optional)
+static uint32_t last_us = 0;
 
+static const float CF_ALPHA = 0.98f; // 0.95~0.99 ได้
 
 // -------------------- I2C helpers --------------------
 static void i2cWriteByte(uint8_t addr, uint8_t reg, uint8_t data)
@@ -196,41 +202,76 @@ static bool readMag(Imu9250Data &out)
     return true; // ✅ บอกว่า sample นี้ "ใหม่"
 }
 
+static float wrapPi(float a){
+    while(a > PI) a -= 2*PI;
+    while(a < -PI) a += 2*PI;
+    return a;
+}
+
+// yaw จาก mag หลัง tilt compensation (roll,pitch เป็น rad)
+static bool yawFromMagTilt(const Imu9250Data &d, float roll, float pitch, float &yaw_out)
+{
+    // ต้องมี mag ไม่เป็นศูนย์
+    float mx = d.mx, my = d.my, mz = d.mz;
+    if (mx == 0 && my == 0 && mz == 0) return false;
+
+    // Tilt compensation (หนึ่งในรูปแบบมาตรฐาน)
+    float cr = cos(roll),  sr = sin(roll);
+    float cp = cos(pitch), sp = sin(pitch);
+
+    float mx2 = mx*cp + mz*sp;
+    float my2 = mx*sr*sp + my*cr - mz*sr*cp;
+
+    float yaw = atan2(-my2, mx2); 
+    yaw_out = yaw;
+    return true;
+}
 
 // -------------------- compute angles (roll, pitch, yaw) --------------------
 static void computeAngles(Imu9250Data &out)
 {
-    // ใช้ accel หา roll/pitch
-    float ax = out.ax;
-    float ay = out.ay;
-    float az = out.az;
+    uint32_t now = micros();
+    float dt = (last_us == 0) ? 0.01f : (now - last_us) * 1e-6f;
+    last_us = now;
+    if (dt <= 0 || dt > 0.1f) dt = 0.01f;
 
-    // แปลงกลับเป็น g ชั่วคราว (เพราะสูตรเดิมใช้ g)
+    // 1) roll/pitch จาก accel (rad)
     const float g = 9.80665f;
-    float ax_g = ax / g;
-    float ay_g = ay / g;
-    float az_g = az / g;
+    float ax_g = out.ax / g;
+    float ay_g = out.ay / g;
+    float az_g = out.az / g;
 
-    float roll  = atan2( ay_g, sqrt(ax_g * ax_g + az_g * az_g) );
-    float pitch = -atan2( ax_g, sqrt(ay_g * ay_g + az_g * az_g) );
+    float acc_roll  = atan2( ay_g, sqrt(ax_g*ax_g + az_g*az_g) );
+    float acc_pitch = -atan2( ax_g, sqrt(ay_g*ay_g + az_g*az_g) );
 
-    out.roll_deg  = roll  * 180.0f / PI;
-    out.pitch_deg = pitch * 180.0f / PI;
+    // 2) Integrate gyro → roll/pitch prediction
+    // out.gx/gy/gz เป็น rad/s อยู่แล้ว
+    float gyro_roll  = cf_roll  + out.gx * dt;
+    float gyro_pitch = cf_pitch + out.gy * dt;
 
-    // tilt-compensated mag
-    float mx = out.mx;
-    float my = out.my;
-    float mz = out.mz;
+    // 3) Complementary fuse
+    cf_roll  = CF_ALPHA * gyro_roll  + (1.0f - CF_ALPHA) * acc_roll;
+    cf_pitch = CF_ALPHA * gyro_pitch + (1.0f - CF_ALPHA) * acc_pitch;
 
-    // ชดเชย pitch ก่อน
-    float mx2 = mx * cos(pitch) + mz * sin(pitch);
-    float my2 = mx * sin(roll) * sin(pitch) + my * cos(roll) - mz * sin(roll) * cos(pitch);
+    // 4) yaw จาก mag (tilt-comp ด้วย roll/pitch ที่ฟิวส์แล้ว)
+    float yaw_mag;
+    if (yawFromMagTilt(out, cf_roll, cf_pitch, yaw_mag)) {
+        // จะ fuse yaw ด้วย gyro z แบบง่าย ๆ ก็ได้ (optional)
+        float gyro_yaw = cf_yaw + out.gz * dt;
+        const float YAW_ALPHA = 0.98f;
+        cf_yaw = YAW_ALPHA * gyro_yaw + (1.0f - YAW_ALPHA) * yaw_mag;
+    } else {
+        // ไม่มี mag ใหม่ ก็ integrate gyro อย่างเดียว
+        cf_yaw = cf_yaw + out.gz * dt;
+    }
+    cf_yaw = wrapPi(cf_yaw);
 
-    float yaw = atan2(-my2, mx2);
-    float yaw_deg = yaw * 180.0f / PI;
-    if (yaw_deg < 0.0f)
-        yaw_deg += 360.0f;
+    // output เป็น deg
+    out.roll_deg  = cf_roll  * 180.0f / PI;
+    out.pitch_deg = cf_pitch * 180.0f / PI;
 
+    float yaw_deg = cf_yaw * 180.0f / PI;
+    if (yaw_deg < 0) yaw_deg += 360.0f;
     out.yaw_deg = yaw_deg;
 }
 
