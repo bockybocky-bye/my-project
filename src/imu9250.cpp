@@ -256,7 +256,7 @@ bool imu9250_read(Imu9250Data &out)
 
     g_lastMagUpdated = readMag(out);   // ✅ ได้/ไม่ได้
 
-    //computeAngles(out);
+    computeAngles(out);
 
     g_lastData = out;
 
